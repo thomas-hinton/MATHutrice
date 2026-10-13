@@ -116,6 +116,43 @@ The first call answers `303` with a `Set-Cookie: session=…`. `role` is
 user's name, or one derived from the address. Add `-d 'key=…'` when
 `DEV_LOGIN_KEY` is set.
 
+## Deploying on Azure App Service
+
+This fork is deployed by `.github/workflows/architecture.yml` to two App Service
+apps on one B1 Linux plan: `staging` and `production`. Both hold generated data
+and no real users, so both sign in through the
+[connexion de développement](#connexion-de-développement-auth_modedev), each with
+its own `DEV_LOGIN_KEY` and its own `SESSION_SECRET`. That is the one exception to
+the deployment checklist's `AUTH_MODE` line above.
+
+- **Staging, on green.** A push to the default branch whose `architecture` job
+  passes is built into one image from the `Dockerfile`, tagged with its commit
+  and pushed to GHCR (`ghcr.io/thomas-hinton/mathutrice:<commit>`, public), then
+  deployed to staging. The deploy passes only once `/dev/login` answers `200`
+  with that commit in its `X-Revision` header, so a previous container still
+  answering does not count. A pull request or a red run deploys nothing.
+- **Production** is not deployed by the workflow yet.
+
+The image runs the one process the local start runs, `uvicorn
+mathutrice.app:app`: its lifespan creates the tables, seeds the missing rows and
+starts the scheduler that cleans old conversations up.
+
+Each environment's settings live in the GitHub Environment of the same name,
+never in a committed file: the variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+`AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP` and `AZURE_WEBAPP_NAME`, and the
+secrets `DEV_LOGIN_KEY`, `SESSION_SECRET` and `LLM_API_KEY`. Every deploy writes
+them to the app's settings (`.github/actions/deploy-to-app-service`), with the
+settings that are the same everywhere: `AUTH_MODE=dev`,
+`DATABASE_URL=sqlite:///./mathutrice.db`, `LLM_BASE_URL`, `LLM_MODEL`,
+`WEBSITES_PORT=8000` and `WEBSITES_ENABLE_APP_SERVICE_STORAGE=false`. The
+workflow logs in to Azure through OpenID Connect and stores no Azure password.
+
+**Known limit: the data is reset at every deploy and every restart.** The SQLite
+file lives on the container's own disk, not on App Service's lasting storage,
+`/home`, a network share on which SQLite cannot take its locks. Each start
+creates the database and seeds it again, so everything written since the last
+start is lost.
+
 ## Layout
 
 ```
