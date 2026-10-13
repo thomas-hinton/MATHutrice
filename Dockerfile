@@ -35,6 +35,12 @@ RUN useradd --system --no-create-home app \
     && chown app /app mathutrice/rag_documents
 USER app
 
+# The commit the image is built from (`--build-arg REVISION=…`). The application
+# sends it back in the X-Revision header, so a deploy knows which image answers.
+# Last, so that it does not invalidate the cached layers above.
+ARG REVISION=unknown
+ENV REVISION=$REVISION
+
 # One process, as the README starts it: uvicorn serves the routes, and its
 # lifespan creates the tables, seeds the missing rows and starts the scheduler
 # that cleans old conversations up. `exec` makes uvicorn the container's main
