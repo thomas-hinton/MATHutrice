@@ -131,7 +131,14 @@ the deployment checklist's `AUTH_MODE` line above.
   deployed to staging. The deploy passes only once `/dev/login` answers `200`
   with that commit in its `X-Revision` header, so a previous container still
   answering does not count. A pull request or a red run deploys nothing.
-- **Production** is not deployed by the workflow yet.
+- **Production, by Promotion only.** A run of the workflow started by hand
+  (*Actions → Architecture → Run workflow*, on the default branch) deploys the
+  image of staging's last green deploy, and builds nothing. It reads the
+  workflow's push runs on the default branch, newest first, logs each one whose
+  `deploy to staging` did not pass as skipped, and promotes the commit of the
+  first one that did. It never reads the staging app, which after a failed
+  deploy is still set to the image that never answered. Production then waits
+  for that image to answer, as staging did, with its own settings and secrets.
 
 The image runs the one process the local start runs, `uvicorn
 mathutrice.app:app`: its lifespan creates the tables, seeds the missing rows and
