@@ -222,3 +222,6 @@ mathutrice.db
 #  Local agent state (worktrees, session data). CLAUDE.md at the repository root
 #  is the shared, tracked part; nothing under .claude/ is.
 .claude/
+
+# TP lab instructions (local only)
+lab-3--agent.md
