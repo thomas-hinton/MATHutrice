@@ -3,14 +3,20 @@
 # packages import each other. They are the commands a contributor runs locally,
 # so a red run here is reproducible with two lines in a terminal.
 #
-# Then, on a push to the fork's default branch whose check passed, the deploy:
-# one image per commit, tagged with it, deployed to staging. Production is not
-# deployed from here yet.
+# Then the deploy, to two environments, each an App Service app with its own
+# settings and secrets, held in the GitHub Environment of the same name:
+#
+# - staging: a push to the fork's default branch whose check passed is built
+#   into one image, tagged with its commit, and deployed to staging.
+# - production: only by the Promotion, a run started by hand (workflow_dispatch).
+#   It deploys the image of staging's last green deploy and builds nothing, so
+#   production only ever runs an image staging already ran.
 name: Architecture
 
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,6 +24,8 @@ permissions:
 jobs:
   architecture:
     name: architecture
+    # The Promotion builds nothing, so it has nothing to check.
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -97,6 +105,88 @@ jobs:
         uses: ./.github/actions/deploy-to-app-service
         with:
           image: ${{ steps.image.outputs.image }}
+          resource-group: ${{ vars.AZURE_RESOURCE_GROUP }}
+          app-name: ${{ vars.AZURE_WEBAPP_NAME }}
+          dev-login-key: ${{ secrets.DEV_LOGIN_KEY }}
+          session-secret: ${{ secrets.SESSION_SECRET }}
+          llm-api-key: ${{ secrets.LLM_API_KEY }}
+
+  # The Promotion, first half: find the image of staging's last green deploy.
+  # It reads this workflow's own runs, not the staging app: a deploy sets the
+  # image before it waits for it to answer, so after a failed deploy the app is
+  # still set to the image that never answered, and that image must not reach
+  # production. Reading runs needs no Azure login, only `actions: read`.
+  last-green-staging:
+    name: find staging's last green deploy
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      image: ${{ steps.find.outputs.image }}
+    steps:
+      # The push runs on the default branch, newest first. The first whose
+      # `deploy to staging` job passed, in its latest attempt, deployed the
+      # image tagged with its commit; every newer run is logged as skipped,
+      # with why. With no such run, nothing is promoted. Only the newest 100
+      # push runs are read. `deploy to staging` is the name of the job above:
+      # renaming it means renaming it here too.
+      - name: Find the last run whose deploy to staging passed
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEPLOY_BRANCH: course-2026-fallback-ci
+        run: |
+          runs=$(gh run list --workflow architecture.yml --branch "$DEPLOY_BRANCH" --event push --limit 100 \
+            --json databaseId,headSha --jq '.[] | "\(.databaseId) \(.headSha)"')
+          while read -r run sha; do
+            [ -n "$run" ] || continue
+            deploy=$(gh run view "$run" --json jobs --jq '.jobs[] | select(.name == "deploy to staging") | .conclusion')
+            if [ "$deploy" = success ]; then
+              image="ghcr.io/${GITHUB_REPOSITORY,,}:$sha"
+              echo "Run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run, commit $sha: deploy to staging passed"
+              echo "Promoting $image"
+              echo "image=$image" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Run $run, commit $sha: deploy to staging ${deploy:-has no result yet}, skipped"
+          done <<< "$runs"
+          echo "No push run on $DEPLOY_BRANCH has a deploy to staging that passed: nothing to promote" >&2
+          exit 1
+
+  # The Promotion, second half: deploy that same image to production, through
+  # the same action as staging. Nothing is rebuilt; only production's own
+  # settings and secrets differ.
+  promote-production:
+    name: promote to production
+    needs: last-green-staging
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    environment:
+      name: production
+      url: https://${{ vars.AZURE_WEBAPP_NAME }}.azurewebsites.net
+    steps:
+      # For the deploy action only: nothing is built from this checkout.
+      - uses: actions/checkout@v7
+
+      # OpenID Connect, as the production GitHub Environment.
+      - name: Log in to Azure
+        uses: azure/login@v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy that image to production
+        uses: ./.github/actions/deploy-to-app-service
+        with:
+          image: ${{ needs.last-green-staging.outputs.image }}
           resource-group: ${{ vars.AZURE_RESOURCE_GROUP }}
           app-name: ${{ vars.AZURE_WEBAPP_NAME }}
           dev-login-key: ${{ secrets.DEV_LOGIN_KEY }}
